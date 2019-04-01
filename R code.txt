@@ -1,0 +1,278 @@
+# it could be pasted to R studio.
+# oringinal data could be downloaded at 
+# https://github.com/Liu-Y28/amazon-reviews-sentiment-analysis
+##################################
+#Libraries Used 
+
+library(dplyr)
+library(tidyverse)
+library(readtext)
+library(ggplot2)
+library(rvest)
+library(tm)
+library(curl)
+library(RWeka)
+library(RTextTools)
+library(tidytext)
+library(slam)
+library(Matrix)
+library(irlba)
+library(randomForest)
+library(ROCR)
+library(wordcloud)
+library(caret)
+
+
+# Importing the Dataset
+
+# Data was distrbuted into multiple text files, therefore we make use of the 'readtext' package to read in
+#the files.
+
+pos <- readtext('C:/Users/yliu11/Documents/GitHub/SMAGroup4/Data/sentiment_amazon_product_reviews/sentiment_amazon_product_reviews/positive/*.txt')
+
+
+neg <- readtext('C:/Users/yliu11/Documents/GitHub/SMAGroup4/Data/sentiment_amazon_product_reviews/sentiment_amazon_product_reviews/negative/*.txt')
+
+##########################
+# Data Preprocessing
+##########################
+
+
+# We make copies of the data to preserve integrity.
+
+c_pos <- pos
+c_neg <- neg
+
+# We create a dependent variable, where 1 stands for all positive reviews and 0 stands for all negative reviews.
+
+c_pos$stance <- 1
+c_neg$stance <- 0 
+
+# The two datasets with positive and negative reviews are combind together using the rbind package to perform
+# further processing and get the data ready for sentiment analysis 
+
+reviews <- rbind(c_pos, c_neg)
+
+# Creating a copy of the data to ensure integrity
+
+c_reviews <- reviews
+
+# Ordering the Data
+c_reviews <- c_reviews[order(c_reviews[,1]),]
+
+# Ensuring we clear out all non-recognizable characters so that the 'tm' package is able to work efficiently and
+# doesn't get into trouble with processing. This also takes care of the emoticons present in the data
+
+reviews_text <- sapply(c_reviews[,2],function(x) iconv(x, 'utf8', 'ascii',""))
+
+# Creation of the corpus 
+
+corpus <- VCorpus(VectorSource(reviews_text))
+
+
+# Cleaning the reviews corpus
+
+# Transformation to lower characters
+corpus = tm_map(corpus, content_transformer(tolower))
+
+# Removal of numbers present in the data
+corpus = tm_map(corpus, removeNumbers)
+
+# Removal of punctuations 
+corpus = tm_map(corpus, removePunctuation)
+
+# Removal of stopwords
+corpus = tm_map(corpus, removeWords, stopwords())
+
+# Removal of unnecessary whitespace
+corpus = tm_map(corpus, stripWhitespace)
+
+# Usually we would run a spell check as well , however, as it takes a considerable amount of time over a corpus of
+# 6000 elements and we have a constraint of time, we chose to not run it for this particular exercise. In all other
+# scenarios, it is highly recommended and is of great importance.
+
+##########################
+# The Document Term Matrix
+##########################
+
+# Creation of the tokenizer which would be deployed to create our DTM
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 2))
+
+# Creation of the DTM 
+dtm_reviews <- DocumentTermMatrix(corpus, control = list( tokenizers = BigramTokenizer,
+                                                          weighting =function(x) weightTf(x)))
+
+# Removal of Sparse terms from the DTM, with a sparse limit of 0.995. The sparse limit can be set according to the
+# data set elements. The higher the number of documents, the higher the sparse
+dtm_reviews <- removeSparseTerms(dtm_reviews,0.995)
+
+# Word Cloud formation on the original data set
+# We make use of the termFreq function from the tm package to move further  
+tf <- termFreq(reviews_text)
+
+# Word Cloud on the original data set 
+wordcloud(names(tf),tf,
+          max.words=50,
+          scale=c(3,1))
+
+# Converting the DTM into a matrix
+matrix_dtm <- as.matrix(dtm_reviews)
+
+# Counting the occurances of each term in the DTM
+v_dtm <- sort(colSums(matrix_dtm),decreasing=TRUE)
+dtfr_dtm <- data.frame(word = names(v_dtm),freq=v_dtm)
+
+
+# Creation of the word cloud based on the DTM
+options(warn=-1)
+wordcloud(dtfr_dtm$word,dtfr_dtm$freq,
+          max.words=50,
+          scale=c(3,1))
+
+wordcloud(corpus, max.words = 50, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+
+
+#######################################
+# Sentiment Analysis, Dictionary Lookup
+#######################################
+
+# Reading in the dictionary file
+dictionary <- read.csv("C:/Users/yliu11/Documents/GitHub/SMA/Data/SentimentDictionary.csv")
+
+# Understanding the dictionary
+head(dictionary)
+
+# Recoding every column so that the neutral values equal 0, negative values go to -5 and positive values go to 5
+dictionary[,2:4] <- sapply(dictionary[,2:4],function(x) x-5)
+
+# Determination of the Sentiment. We do not really need the DTM here but we do need to split the strings into
+# multiple substrings and this can be achieved by the 'strsplit' function
+sentimentScore <- numeric(length(reviews_text))
+
+for (i in 1:length(reviews_text)){
+text_lower <- tolower(reviews_text)                     # Here, we convert the text to lowercase
+split_text <- strsplit(text_lower[i],split=" ")[[1]]    # Here, we split the text, this can be considered as the most common form of tokenization
+m <- match(split_text, dictionary$Word)                 # Here, we match the position of the text in the dictionary
+present <- !is.na(m)                                    # Here, we check wether the text is present or not
+wordvalences <- dictionary$VALENCE[m[present]]          # Here, we calculate the valance of the text that is present
+sentimentScore[i] <- mean(wordvalences, na.rm=TRUE)     # Here, we calculate the mean valance of the whole review text
+if (is.na(sentimentScore[i])) sentimentScore[i] <- 0 else sentimentScore[i] <- sentimentScore[i]  # Handling of circumstances when the text is not present in the dictionary
+}
+
+
+# Checking the results of the above 'for' loop
+head(sentimentScore)
+mean(sentimentScore)
+sd(sentimentScore)
+
+#######################################
+# Sentiment Analysis, Machine Learning
+#######################################
+
+# Factorizing the dependent variable
+y <- as.factor(c_reviews[,'stance'])
+
+# Check for factor levels
+levels(y)
+
+# The proportion split for the training set
+prop_split <- 0.5
+
+# Defining the observations to be the contents of the training set
+class_train1 <- sample(which(y==as.integer(levels(y)[1])), floor(prop_split*table(y)[1]),replace=FALSE)
+class_train2 <- sample(which(y==as.integer(levels(y)[2])), floor(prop_split*table(y)[2]),replace=FALSE)
+
+training_locs <- c(class_train1, class_train2) 
+
+
+# Creation of training and test sets. We define them as lists for ease of access and processing
+text_list <- list()
+text_list[[2]] <- list()
+
+text_list[[1]]<- c_reviews[sort(training_locs),2]
+text_list[[2]]<- c_reviews[-sort(training_locs),2]
+
+
+# The 'for' loop to create the training and testing corpus for our analysis
+for (i in 1:2){
+  text_list[[i]] <- VCorpus(VectorSource((text_list[[i]])))
+}
+
+
+# Function to correctly assign training and testing data. Ensuring we have the Ngrams properly defined
+Ngram <- function(inputset1,inputset2,mindegree,maxdegree){
+  # inputset1 = training dataset
+  # inputset2 = test dataset
+  # mindegree = minimum n-gram
+  # maxdegree = maximum n-gram
+  outputlist <- list()
+  Tokenizer <- function(x) NGramTokenizer(x, Weka_control(min = mindegree, max = maxdegree))   # We create the tokenizer
+  
+  tr <- DocumentTermMatrix(inputset1, control = list(tokenize = Tokenizer,                     # DTM creation for the training data
+                                                     weighting = function(x) weightTf(x),
+                                                     RemoveNumbers=TRUE,
+                                                     removePunctuation=TRUE,
+                                                     stripWhitespace= TRUE))
+  
+  test <- DocumentTermMatrix(inputset2, control = list(tokenize = Tokenizer,                   # DTM creation for the testing data
+                                                       weighting = function(x) weightTf(x),
+                                                       RemoveNumbers=TRUE,
+                                                       removePunctuation=TRUE,
+                                                       stripWhitespace= TRUE))
+  
+  Intersect <- test[,intersect(colnames(test), colnames(tr))]                                   # Reforming the test DTM to have the same terms as the training DTM
+  diffCol <- tr[,setdiff(colnames(tr),colnames(test))]
+  newCols <- as.simple_triplet_matrix(matrix(0,nrow=test$nrow,ncol=diffCol$ncol))
+  newCols$dimnames <- diffCol$dimnames
+  testNew<-cbind(Intersect,newCols)
+  testNew<- testNew[,colnames(tr)]
+  dtm.to.sm <- function(dtm) {sparseMatrix(i=dtm$i, j=dtm$j, x=dtm$v,dims=c(dtm$nrow, dtm$ncol))}  # Conversion of DTMs to Sparse Matrices for efficient SVD performance
+  outputlist<- list(train=dtm.to.sm(tr),test=dtm.to.sm(testNew))
+  return(outputlist)
+}
+
+
+# Application of the NGram Function
+unigram <- Ngram(text_list[[1]], text_list[[2]], 1, 1)
+
+# Creation and Application of the Singular Value Decomposition. The SVD method helps us reduce the number of terms
+# to a selected number
+SVD_all <- function(inputset,k){
+  outputlist <- list()
+  outputlist[[i]]<-list()
+  trainer <- irlba(t(inputset[[1]]), nu=k, nv=k)
+  tester <- as.data.frame(as.matrix(inputset[[2]] %*% trainer$u %*%  solve(diag(trainer$d))))
+  outputlist<- list(train = as.data.frame(trainer$v), test= tester)
+  return(outputlist)
+}
+
+#Application of the SVD_all function
+svdUnigram <- SVD_all(unigram,100)
+
+# Appending the dependent variable to the data sets and creating the data sets to be used
+train  <- cbind(y[sort(training_locs)],svdUnigram[[1]])
+test <- cbind(y[-sort(training_locs)],svdUnigram[[2]])
+
+# Application of the Random Forest Model
+rf_model_train <- randomForest(x=train[,2:dim(train)[[2]]], y=train[,1], importance=TRUE,ntree=1001)
+rf_predict <- predict(rf_model_train, test[,2:dim(test)[[2]]], type = "prob")[,2]
+
+
+rf_predict_resp <- predict(rf_model_train, test[,2:dim(test)[[2]]], type = "response")
+
+
+# Calculation of the Area Under Curve (AUC)
+pred_ml <- prediction(rf_predict, test[,1])
+
+# Build up of the ROC curve
+perf_ml <- performance(pred_ml,"tpr","fpr")
+plot(perf_ml, main="ROC")
+abline(0,1)
+
+# AUC
+auc.perf_ml = performance(pred_ml, measure = "auc")
+auc.perf_ml@y.values
+
+# Confusion Matrix
+confusionMatrix(rf_predict_resp, test[,1])
